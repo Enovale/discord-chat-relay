@@ -4,10 +4,11 @@
 #include <sdktools>
 #include <discord>
 #include <socket>
-#include <chatcolors>
+#include <ripext>
+#include <morecolors>
 
 #undef REQUIRE_PLUGIN
-#include <chat-processor>
+//#include <chat-processor>
 
 #pragma newdecls required
 
@@ -23,51 +24,68 @@ DiscordBot gDB_Bot = view_as<DiscordBot>(INVALID_HANDLE);
 
 // ConVars
 ConVar gCV_DiscordChatChannel;
+ConVar gCV_DiscordWebhookLink;
 
 ConVar gCV_DiscordEnable;
+ConVar gCV_DiscordWebhookModeEnable;
+
+ConVar gCV_SteamApiKey;
 
 ConVar gCV_SocketEnable;
 ConVar gCV_SocketPort;
 
 ConVar gCV_ServerMessageTag;
 ConVar gCV_DiscordMessageTag;
+ConVar gCV_DiscordMessageFormat;
+ConVar gCV_DiscordNameFormat;
 
 char gS_BotToken[128];
 
 char gS_ServerTag[128];
 char gS_DiscordTag[128];
+char gS_DiscordMessageFormat[1024];
+char gS_DiscordNameFormat[512];
+char szAPIKey[256];
 
-bool gB_ChatProcessor;
+HTTPClient httpClient;
+char g_szSteamAvatar[MAXPLAYERS + 1][256];
+
 bool gB_ListeningToDiscord = false;
 
 
-public Plugin myinfo = 
+public Plugin myinfo =
 {
 	name = "Discord Chat Relay - Server",
-	author = "PaxPlay, Credits to Ryan \"FLOOR_MASTER\" Mannion, shavit and Deathknife",
+	author = "PaxPlay, Credits to Ryan \"FLOOR_MASTER\" Mannion, shavit and Deathknife, +SyntX, Enova",
 	description = "Chat relay between a sourcemod server and Discord.",
-	version = "1.0.0",
+	version = "1.2.3",
 	url = ""
 };
 
 public void OnPluginStart()
 {
 	gCV_DiscordChatChannel = CreateConVar("sm_discord_text_channel_id", "", "The Discord text channel id.");
-	
+	gCV_DiscordWebhookLink = CreateConVar("sm_discord_webhook_link", "", "The Discord webhook to use if sm_discord_webhook_mode_enable is enabled.");
+	gCV_DiscordWebhookModeEnable = CreateConVar("sm_discord_webhook_mode_enable", "0", "Enable the pretty webhook mode for the discord relay.", 0, true, 0.0, true, 1.0);
+
 	gCV_DiscordEnable = CreateConVar("sm_discord_relay_enable", "1", "Enable the chat relay with Discord.", 0, true, 0.0, true, 1.0);
-	
+
+	gCV_SteamApiKey = CreateConVar("sm_steam_api_key", "", "A steam API key is needed to get avatar URLs");
+
 	gCV_SocketEnable = CreateConVar("sm_discord_socket_enable", "0", "Enable the cross server chat relay.", 0, true, 0.0, true, 1.0);
 	gCV_SocketPort = CreateConVar("sm_discord_socket_port", "13370", "Port for the cross server chat relay socket.");
-	
+
 	gCV_ServerMessageTag = CreateConVar("sm_discord_chat_prefix_server", "{grey}[{green}SERVER{grey}]", "Chat Tag for messages from the server.");
 	gCV_DiscordMessageTag = CreateConVar("sm_discord_chat_prefix_discord", "{grey}[{blue}DISCORD{grey}]", "Chat Tag for messages from discord.");
-	
+	gCV_DiscordMessageFormat = CreateConVar("sm_discord_chat_message_format", "{MESSAGE}", "How to format the message portion of the discord relay");
+	gCV_DiscordNameFormat = CreateConVar("sm_discord_chat_name_format", "{NAME} ({STEAM32})", "How to format the name portion of the discord relay");
+
 	gCV_ServerMessageTag.AddChangeHook(OnConVarChanged);
 	gCV_DiscordMessageTag.AddChangeHook(OnConVarChanged);
-	
+	gCV_DiscordMessageFormat.AddChangeHook(OnConVarChanged);
+	gCV_DiscordNameFormat.AddChangeHook(OnConVarChanged);
+
 	AutoExecConfig(true, "discord-chat-relay-server", "sourcemod");
-	
-	gB_ChatProcessor = LibraryExists("chat-processor");
 }
 
 public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -79,19 +97,28 @@ void UpdateCvars()
 {
 	char buffer[128];
 	gCV_ServerMessageTag.GetString(buffer, sizeof(buffer));
-	SCC_ReplaceColors(buffer, sizeof(buffer));
 	FormatEx(gS_ServerTag, sizeof(gS_ServerTag), "%s", buffer);	// Update Gameserver Chat Tag
-	
+
 	gCV_DiscordMessageTag.GetString(buffer, sizeof(buffer));
-	SCC_ReplaceColors(buffer, sizeof(buffer));
 	FormatEx(gS_DiscordTag, sizeof(gS_DiscordTag), "%s", buffer);	// Update Discord Chat Tag
+
+	gCV_DiscordMessageFormat.GetString(gS_DiscordMessageFormat, sizeof(gS_DiscordMessageFormat));
+	gCV_DiscordNameFormat.GetString(gS_DiscordNameFormat, sizeof(gS_DiscordNameFormat));
+
+	// Update and cache steam api key
+	GetConVarString(gCV_SteamApiKey, szAPIKey, sizeof(szAPIKey));
+    if (StrEqual(szAPIKey, "", false))
+    {
+        PrintToConsole(0, "[Infra-DCR] ERROR: Steam API Key not configured.");
+        return;
+    }
 }
 
 bool LoadConfig()
 {
 	char[] sPath = new char[PLATFORM_MAX_PATH];
 	BuildPath(Path_SM, sPath, PLATFORM_MAX_PATH, "configs/dcr.cfg");
-	
+
 	if (!FileExists(sPath))
 	{
 		File hFile = OpenFile(sPath, "w");
@@ -100,25 +127,25 @@ bool LoadConfig()
 		WriteFileLine(hFile, "\t\"bot-token\"\t\"<insert-bot-token>\"");
 		WriteFileLine(hFile, "}");
 		CloseHandle(hFile);
-		
-		LogError("[DCR] \"%s\" not found, creating!", sPath);
+
+		LogError("[Discord Chat Relay] \"%s\" not found, creating!", sPath);
 		return false;
 	}
-	
+
 	KeyValues kv = new KeyValues("discord-chat-relay");
-	
+
 	if(!kv.ImportFromFile(sPath))
 	{
 		delete kv;
-		LogError("[DCR] Couldnt import KeyValues from \"%s\"!", sPath);
-		
+		LogError("[Discord Chat Relay] Couldnt import KeyValues from \"%s\"!", sPath);
+
 		return false;
 	}
-	
+
 	kv.GetString("bot-token", gS_BotToken, sizeof(gS_BotToken));
-	
+
 	LogMessage("Loaded the BotToken.");
-	
+
 	delete kv;
 	return true;
 }
@@ -127,38 +154,41 @@ public void OnAllPluginsLoaded()
 {
 	if(gDB_Bot != view_as<DiscordBot>(INVALID_HANDLE))
 		return;
-	
+
 	if (LoadConfig())
 		gDB_Bot = new DiscordBot(gS_BotToken);
 	else
-		LogError("Couldnt load the dcr config.");
+		LogError("Couldnt load the Discord Chat Relay config.");
 }
 
 public void OnConfigsExecuted()
 {
 	UpdateCvars();
-	
+
 	if (gCV_DiscordEnable.BoolValue && gDB_Bot != view_as<DiscordBot>(INVALID_HANDLE))
 	{
 		if(!gB_ListeningToDiscord)
 			gDB_Bot.GetGuilds(GuildList, INVALID_FUNCTION);
 	}
-	
+
+	if (httpClient != null)
+    	delete httpClient;
+
+    httpClient = new HTTPClient("https://api.steampowered.com");
+
 	if(gCV_SocketEnable.BoolValue && gH_Socket == INVALID_HANDLE)
 	{
 		char ip[24];
 		int port = gCV_SocketPort.IntValue;
 		GetServerIP(ip, sizeof(ip));
-		
+
 		gH_Socket = SocketCreate(SOCKET_TCP, OnSocketError);
 		SocketBind(gH_Socket, ip, port);
 		SocketListen(gH_Socket, OnSocketIncoming);
-		
+
 		gAL_Clients = CreateArray();
-		
-		LogMessage("%s chat-processor. DCR %s be able to send messages.", gB_ChatProcessor ? "Found" : "Couldn\'t find", gB_ChatProcessor ? "will" : "won\'t");
-	
-		LogMessage("[DCR] Started Server Chat Relay server on port %d", port);
+
+		LogMessage("[Discord Chat Relay] Started Server Chat Relay server on port %d", port);
 	}
 }
 
@@ -172,19 +202,20 @@ public void ChannelList(DiscordBot bot, char[] guild, DiscordChannel Channel, an
 	if(Channel.IsText) {
 		char id[32];
 		Channel.GetID(id, sizeof(id));
-		
+
 		char sChannelID[64];
 		gCV_DiscordChatChannel.GetString(sChannelID, sizeof(sChannelID));
-		
+
 		if(StrEqual(id, sChannelID) && !gB_ListeningToDiscord)
 		{
 			gDB_Bot.StopListening();
-			
+
 			char name[32];
 			Channel.GetName(name, sizeof(name));
+			gDB_Bot.MessageCheckInterval = 0.5;
 			gDB_Bot.StartListeningToChannel(Channel, OnMessage);
-			
-			LogMessage("[DCR] Started listening to channel %s (%s)", name, id);
+
+			LogMessage("[Discord Chat Relay] Started listening to channel %s (%s)", name, id);
 			gB_ListeningToDiscord = true;
 		}
 	}
@@ -194,16 +225,17 @@ public void OnMessage(DiscordBot Bot, DiscordChannel Channel, DiscordMessage mes
 {
 	if (message.GetAuthor().IsBot())
 		return;
-	
+
 	char sMessage[2048];
 	message.GetContent(sMessage, sizeof(sMessage));
-	
+
 	char sAuthor[128];
 	message.GetAuthor().GetUsername(sAuthor, sizeof(sAuthor));
-	
-	Format(sMessage, sizeof(sMessage), "%s \x01%s: %s", gS_DiscordTag, sAuthor, sMessage);
-	
-	PrintToChatAll(" %s", sMessage);
+
+
+	Format(sMessage, sizeof(sMessage), "%s %s: %s", gS_DiscordTag, sAuthor, sMessage);
+
+	CPrintToChatAll("%s", sMessage);
 	Broadcast(INVALID_HANDLE, sMessage, sizeof(sMessage));
 }
 
@@ -211,13 +243,28 @@ public void CP_OnChatMessagePost(int author, ArrayList recipients, const char[] 
 {
 	if(message[0] == '!' || message[1] == '!') // remove chat commands
 		return;
-	
+
 	char sMessage[512];
 	Format(sMessage, sizeof(sMessage), "%s %s: %s", gS_ServerTag, name, message);
-	
+
 	Broadcast(INVALID_HANDLE, sMessage, sizeof(sMessage));
-	
-	SendToDiscord(sMessage ,sizeof(sMessage));
+
+	if (!gCV_DiscordWebhookModeEnable.BoolValue)
+	{
+		SendToDiscord(sMessage ,sizeof(sMessage));
+	}
+	else
+	{
+		Format(sMessage, sizeof(sMessage), "%s", message);
+		char nMessage[512];
+		Format(nMessage, sizeof(nMessage), "%s", name);
+		SendToWebhook(sMessage ,sizeof(sMessage), nMessage, sizeof(nMessage), author);
+	}
+}
+
+public void OnClientPostAdminCheck(int client)
+{
+    GetProfilePic(client);
 }
 
 public void OnMessageSent(DiscordBot bot, char[] channel, DiscordMessage message, any data)
@@ -243,17 +290,17 @@ bool Broadcast(Handle socket, const char[] message, int maxlength)
 {
 	if(!gCV_SocketEnable.BoolValue)
 		return false;
-	
+
 	if(gAL_Clients == INVALID_HANDLE)
 	{
 		LogError("In Broadcast, gAL_Clients was invalid. This should never happen!");
 		return false;
 	}
-	
-	
+
+
 	int size = gAL_Clients.Length;
 	Handle dest_socket = INVALID_HANDLE;
-	
+
 	for (int i = 0; i < size; i++)
 	{
 		dest_socket = gAL_Clients.Get(i);
@@ -262,10 +309,10 @@ bool Broadcast(Handle socket, const char[] message, int maxlength)
 			SocketSend(dest_socket, message, maxlength);
 		}
 	}
-	
+
 	if (socket != INVALID_HANDLE) // Prevent printing to the server chat, if message is by the server.
 	{
-		PrintToChatAll(" %s", message);
+		CPrintToChatAll("%s", message);
 	}
 	return true;
 }
@@ -292,7 +339,7 @@ void RemoveClient(Handle client)
 		LogError("Attempted to remove client while g_clients was invalid. This should never happen!");
 		return;
 	}
-	
+
 	int size = gAL_Clients.Length;
 	for (int i = 0; i < size; i++)
 	{
@@ -302,7 +349,7 @@ void RemoveClient(Handle client)
 			return;
 		}
 	}
-	
+
 	LogError("Could not find client in RemoveClient. This should never happen!");
 }
 
@@ -334,7 +381,7 @@ public int OnSocketError(Handle socket, const int errorType, const int errorNum,
 public int OnChildSocketReceive(Handle socket, char[] receiveData, const int dataSize, any arg)
 {
 	Broadcast(socket, receiveData, dataSize);
-	
+
 	SendToDiscord(receiveData, dataSize);
 }
 
@@ -354,10 +401,108 @@ void SendToDiscord(const char[] message, int maxlength)
 {
 	char[] sMessage = new char[maxlength];
 	FormatEx(sMessage, maxlength, "%s", message);
-	
-	SCC_RemoveColors(sMessage, maxlength);
-	
+
+    SanitiseText(sMessage, maxlength);
+
+	char[] fMessage = new char[1024];
+	FormatEx(fMessage, 1024, "%s", FormatContentWithReplacements(gS_DiscordMessageFormat, "", sMessage, -1));
+
 	char sChannelID[64];
 	gCV_DiscordChatChannel.GetString(sChannelID, sizeof(sChannelID));
-	gDB_Bot.SendMessageToChannelID(sChannelID, sMessage, OnMessageSent);
+	gDB_Bot.SendMessageToChannelID(sChannelID, fMessage, OnMessageSent);
+}
+
+void SendToWebhook(char[] message, int messageLength, char[] authorName, int nameLength, int client)
+{
+	char webhook[1024];
+	GetConVarString(gCV_DiscordWebhookLink, webhook, sizeof(webhook));
+	DiscordWebHook hook = new DiscordWebHook(webhook);
+    hook.SlackMode = true;
+
+    SanitiseText(message, messageLength);
+    SanitiseText(authorName, nameLength);
+    hook.SetContent(FormatContentWithReplacements(gS_DiscordMessageFormat, authorName, message, client));
+
+    hook.SetUsername(FormatContentWithReplacements(gS_DiscordNameFormat, authorName, message, client));
+
+    if (!StrEqual(g_szSteamAvatar[client], "NULL", false) && !StrEqual(g_szSteamAvatar[client], "", false))
+    {
+        PrintToConsole(0, "[Infra-DCR] DEBUG: Client %s has an avatar, using it! URL: %s", client, g_szSteamAvatar[client]);
+        hook.SetAvatar(g_szSteamAvatar[client]);
+    }
+    hook.Send();
+    delete hook;
+}
+
+void SanitiseText(char[] text, int maxLength)
+{
+    ReplaceString(text, maxLength, "@", "", false);
+    ReplaceString(text, maxLength, "`", "", false);
+    ReplaceString(text, maxLength, "\\", "", false);
+    ReplaceString(text, maxLength, "||", "", false);
+    //ReplaceString(text, maxLength, "# ", "", false);
+    //ReplaceString(text, maxLength, "## ", "", false);
+    //ReplaceString(text, maxLength, "### ", "", false);
+
+	CRemoveTags(text, maxLength);
+}
+
+char[] FormatContentWithReplacements(char[] original, const char[] authorName, const char[] message, int client)
+{
+	char buffer[256], sMessage[768];
+	strcopy(sMessage, sizeof(sMessage), original);
+
+	if (client >= 0 && StrContains(sMessage, "{STEAM32}", false) != -1) {
+		GetClientAuthId(client, AuthId_Steam2, buffer, sizeof(buffer));
+		ReplaceString(sMessage, sizeof(sMessage), "{STEAM32}", buffer);
+	}
+	if (StrContains(sMessage, "{MESSAGE}", false) != -1) {
+		ReplaceString(sMessage, sizeof(sMessage), "{MESSAGE}", message);
+	}
+	if (StrContains(sMessage, "{NAME}", false) != -1) {
+		ReplaceString(sMessage, sizeof(sMessage), "{NAME}", authorName);
+	}
+
+	ReplaceString(sMessage, sizeof(sMessage), "\\n", "\n");
+	return sMessage;
+}
+
+void GetProfilePic(int client)
+{
+    char szRequestBuffer[1024], szSteamID[64];
+
+    GetClientAuthId(client, AuthId_SteamID64, szSteamID, sizeof(szSteamID), true);
+    if (StrEqual(szAPIKey, "", false))
+    {
+        PrintToConsole(0, "[Infra-DCR] ERROR: Steam API Key not configured.");
+        return;
+    }
+
+    Format(szRequestBuffer, sizeof szRequestBuffer, "ISteamUser/GetPlayerSummaries/v0002/?key=%s&steamids=%s&format=json", szAPIKey, szSteamID);
+    httpClient.Get(szRequestBuffer, GetProfilePicCallback, client);
+}
+
+public void GetProfilePicCallback(HTTPResponse response, any client)
+{
+    if (response.Status != HTTPStatus_OK)
+    {
+        FormatEx(g_szSteamAvatar[client], sizeof(g_szSteamAvatar[]), "NULL");
+        PrintToConsole(0, "[Infra-DCR] ERROR: Failed to reach SteamAPI. Status: %i", response.Status);
+        return;
+    }
+
+    JSONObject objects = view_as<JSONObject>(response.Data);
+    JSONObject Response = view_as<JSONObject>(objects.Get("response"));
+    JSONArray players = view_as<JSONArray>(Response.Get("players"));
+    int playerlen = players.Length;
+    PrintToConsole(0, "[Infra-DCR] DEBUG: Client %i SteamAPI Response Length: %i", client, playerlen);
+
+    JSONObject player;
+    for (int i = 0; i < playerlen; i++)
+    {
+        player = view_as<JSONObject>(players.Get(i));
+        player.GetString("avatarfull", g_szSteamAvatar[client], sizeof(g_szSteamAvatar[]));
+        PrintToConsole(0, "[Infra-DCR] DEBUG: Client %i has Avatar URL: %s", client, g_szSteamAvatar[client]);
+        delete player;
+    }
 }
