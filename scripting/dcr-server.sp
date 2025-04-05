@@ -7,9 +7,6 @@
 #include <ripext>
 #include <morecolors>
 
-#undef REQUIRE_PLUGIN
-//#include <chat-processor>
-
 #pragma newdecls required
 
 
@@ -38,27 +35,37 @@ ConVar gCV_ServerMessageTag;
 ConVar gCV_DiscordMessageTag;
 ConVar gCV_DiscordMessageFormat;
 ConVar gCV_DiscordNameFormat;
+ConVar gCV_DiscordNewTalkFormat;
+ConVar gCV_DiscordMapChangeFormat;
+ConVar gCV_DiscordPlayerConnectFormat;
+ConVar gCV_DiscordPlayerDisconnectFormat;
 
+// Cached values
 char gS_BotToken[128];
+char gS_WebhookLink[128];
 
 char gS_ServerTag[128];
 char gS_DiscordTag[128];
 char gS_DiscordMessageFormat[1024];
 char gS_DiscordNameFormat[512];
+char gS_DiscordNewTalkFormat[512];
+char gS_DiscordMapChangeFormat[512];
+char gS_DiscordPlayerConnectFormat[512];
+char gS_DiscordPlayerDisconnectFormat[512];
 char szAPIKey[256];
 
 HTTPClient httpClient;
 char g_szSteamAvatar[MAXPLAYERS + 1][256];
+char g_lastMessageAuthorId[64];
 
 bool gB_ListeningToDiscord = false;
 
-
 public Plugin myinfo =
 {
-	name = "Discord Chat Relay - Server",
-	author = "PaxPlay, Credits to Ryan \"FLOOR_MASTER\" Mannion, shavit and Deathknife, +SyntX, Enova",
-	description = "Chat relay between a sourcemod server and Discord.",
-	version = "1.2.3",
+	name = "Discord Chat Relay Deluxe",
+	author = "Enova, Credits to PaxPlay, Ryan \"FLOOR_MASTER\" Mannion, shavit and Deathknife, +SyntX",
+	description = "Chat relay for Discord with pretty printed and compact output.",
+	version = "1.2.4",
 	url = ""
 };
 
@@ -78,12 +85,20 @@ public void OnPluginStart()
 	gCV_ServerMessageTag = CreateConVar("sm_discord_chat_prefix_server", "{grey}[{green}SERVER{grey}]", "Chat Tag for messages from the server.");
 	gCV_DiscordMessageTag = CreateConVar("sm_discord_chat_prefix_discord", "{grey}[{blue}DISCORD{grey}]", "Chat Tag for messages from discord.");
 	gCV_DiscordMessageFormat = CreateConVar("sm_discord_chat_message_format", "{MESSAGE}", "How to format the message portion of the discord relay");
-	gCV_DiscordNameFormat = CreateConVar("sm_discord_chat_name_format", "{NAME} ({STEAM32})", "How to format the name portion of the discord relay");
+	gCV_DiscordNameFormat = CreateConVar("sm_discord_chat_name_format", "{NAME}", "How to format the name portion of the discord relay");
+	gCV_DiscordNewTalkFormat = CreateConVar("sm_discord_new_talk_format", "-# {NAME} | {STEAM32}", "Format text for when a new person talks, for compact output");
+	gCV_DiscordMapChangeFormat = CreateConVar("sm_discord_map_change_format", "-# Map Change: {NEWMAP}", "Format text for when a map change is happening.");
+	gCV_DiscordPlayerConnectFormat = CreateConVar("sm_discord_player_connect_format", "-# {NAME} connected.", "Format text for when someone connects.");
+	gCV_DiscordPlayerDisconnectFormat = CreateConVar("sm_discord_player_disconnect_format", "-# {NAME} disconnected.", "Format text for when someone disconnects.");
 
 	gCV_ServerMessageTag.AddChangeHook(OnConVarChanged);
 	gCV_DiscordMessageTag.AddChangeHook(OnConVarChanged);
 	gCV_DiscordMessageFormat.AddChangeHook(OnConVarChanged);
 	gCV_DiscordNameFormat.AddChangeHook(OnConVarChanged);
+	gCV_DiscordNewTalkFormat.AddChangeHook(OnConVarChanged);
+	gCV_DiscordMapChangeFormat.AddChangeHook(OnConVarChanged);
+	gCV_DiscordPlayerConnectFormat.AddChangeHook(OnConVarChanged);
+	gCV_DiscordPlayerDisconnectFormat.AddChangeHook(OnConVarChanged);
 
 	AutoExecConfig(true, "discord-chat-relay-server", "sourcemod");
 }
@@ -104,6 +119,12 @@ void UpdateCvars()
 
 	gCV_DiscordMessageFormat.GetString(gS_DiscordMessageFormat, sizeof(gS_DiscordMessageFormat));
 	gCV_DiscordNameFormat.GetString(gS_DiscordNameFormat, sizeof(gS_DiscordNameFormat));
+	gCV_DiscordNewTalkFormat.GetString(gS_DiscordNewTalkFormat, sizeof(gS_DiscordNewTalkFormat));
+	gCV_DiscordMapChangeFormat.GetString(gS_DiscordMapChangeFormat, sizeof(gS_DiscordMapChangeFormat));
+	gCV_DiscordPlayerConnectFormat.GetString(gS_DiscordPlayerConnectFormat, sizeof(gS_DiscordPlayerConnectFormat));
+	gCV_DiscordPlayerDisconnectFormat.GetString(gS_DiscordPlayerDisconnectFormat, sizeof(gS_DiscordPlayerDisconnectFormat));
+
+	GetConVarString(gCV_DiscordWebhookLink, gS_WebhookLink, sizeof(gS_WebhookLink));
 
 	// Update and cache steam api key
 	GetConVarString(gCV_SteamApiKey, szAPIKey, sizeof(szAPIKey));
@@ -212,7 +233,7 @@ public void ChannelList(DiscordBot bot, char[] guild, DiscordChannel Channel, an
 
 			char name[32];
 			Channel.GetName(name, sizeof(name));
-			gDB_Bot.MessageCheckInterval = 0.5;
+			gDB_Bot.MessageCheckInterval = 2.0;
 			gDB_Bot.StartListeningToChannel(Channel, OnMessage);
 
 			LogMessage("[Discord Chat Relay] Started listening to channel %s (%s)", name, id);
@@ -230,9 +251,12 @@ public void OnMessage(DiscordBot Bot, DiscordChannel Channel, DiscordMessage mes
 	message.GetContent(sMessage, sizeof(sMessage));
 
 	char sAuthor[128];
-	message.GetAuthor().GetUsername(sAuthor, sizeof(sAuthor));
+	DiscordUser author = message.GetAuthor();
+	author.GetUsername(sAuthor, sizeof(sAuthor));
 
-
+	char sAuthorId[64];
+	author.GetID(sAuthorId, sizeof(sAuthorId));
+    Format(g_lastMessageAuthorId, sizeof(g_lastMessageAuthorId), "%s", sAuthorId);
 	Format(sMessage, sizeof(sMessage), "%s %s: %s", gS_DiscordTag, sAuthor, sMessage);
 
 	CPrintToChatAll("%s", sMessage);
@@ -249,6 +273,10 @@ public void CP_OnChatMessagePost(int author, ArrayList recipients, const char[] 
 
 	Broadcast(INVALID_HANDLE, sMessage, sizeof(sMessage));
 
+	char szSteamID[64];
+
+    GetClientAuthId(author, AuthId_SteamID64, szSteamID, sizeof(szSteamID), true);
+
 	if (!gCV_DiscordWebhookModeEnable.BoolValue)
 	{
 		SendToDiscord(sMessage ,sizeof(sMessage));
@@ -258,13 +286,47 @@ public void CP_OnChatMessagePost(int author, ArrayList recipients, const char[] 
 		Format(sMessage, sizeof(sMessage), "%s", message);
 		char nMessage[512];
 		Format(nMessage, sizeof(nMessage), "%s", name);
-		SendToWebhook(sMessage ,sizeof(sMessage), nMessage, sizeof(nMessage), author);
+
+		if (!StrEqual(szSteamID, g_lastMessageAuthorId))
+		{
+			SanitiseText(nMessage, sizeof(nMessage));
+			char cMessage[1024];
+			Format(cMessage, sizeof(cMessage), "%s\n%s", FormatContentWithReplacements(gS_DiscordNewTalkFormat, nMessage, "", author), FormatContentWithReplacements(gS_DiscordMessageFormat, nMessage, sMessage, author));
+			SendOutput(cMessage, nMessage, author, false);
+		}
+		else
+		{
+			SendToWebhook(sMessage ,sizeof(sMessage), nMessage, sizeof(nMessage), author);
+		}
 	}
+
+    Format(g_lastMessageAuthorId, sizeof(g_lastMessageAuthorId), "%s", szSteamID);
 }
 
 public void OnClientPostAdminCheck(int client)
 {
     GetProfilePic(client);
+
+	char sMessage[512];
+	GetClientName(client, sMessage, sizeof(sMessage));
+	SanitiseText(sMessage, sizeof(sMessage));
+	SendOutput(FormatContentWithReplacements(gS_DiscordPlayerConnectFormat, sMessage, "", client), "Server Events", client, false);
+}
+
+public void OnMapInit(const char[] mapName)
+{
+	char sMessage[512];
+	Format(sMessage, sizeof(sMessage), "%s", mapName);
+	SanitiseText(sMessage, sizeof(sMessage));
+	SendOutput(FormatContentWithReplacements(gS_DiscordMapChangeFormat, sMessage, "", -1), "Server Events", -1, false);
+}
+
+public void OnClientDisconnect_Post(int client)
+{
+	char sMessage[512];
+	GetClientName(client, sMessage, sizeof(sMessage));
+	SanitiseText(sMessage, sizeof(sMessage));
+	SendOutput(FormatContentWithReplacements(gS_DiscordPlayerDisconnectFormat, sMessage, "", client), "Server Events", client, false);
 }
 
 public void OnMessageSent(DiscordBot bot, char[] channel, DiscordMessage message, any data)
@@ -397,6 +459,36 @@ public int OnChildSocketError(Handle socket, const int errorType, const int erro
 	CloseHandle(socket);
 }
 
+void SendOutput(const char[] message, const char[] name, int client, bool discord)
+{
+	if (discord)
+	{
+		char[] sMessage = new char[1024];
+		FormatEx(sMessage, 1024, "%s", message);
+
+		char sChannelID[64];
+		gCV_DiscordChatChannel.GetString(sChannelID, sizeof(sChannelID));
+		gDB_Bot.SendMessageToChannelID(sChannelID, sMessage, OnMessageSent);
+	}
+	else
+	{
+		DiscordWebHook hook = new DiscordWebHook(gS_WebhookLink);
+		hook.SlackMode = true;
+
+		hook.SetContent(message);
+
+		hook.SetUsername(name);
+
+		if (client >= 0 && !StrEqual(g_szSteamAvatar[client], "NULL", false) && !StrEqual(g_szSteamAvatar[client], "", false))
+		{
+			PrintToConsole(0, "[Infra-DCR] DEBUG: Client %s has an avatar, using it! URL: %s", 	client, g_szSteamAvatar[client]);
+			hook.SetAvatar(g_szSteamAvatar[client]);
+		}
+		hook.Send();
+		delete hook;
+	}
+}
+
 void SendToDiscord(const char[] message, int maxlength)
 {
 	char[] sMessage = new char[maxlength];
@@ -425,7 +517,7 @@ void SendToWebhook(char[] message, int messageLength, char[] authorName, int nam
 
     hook.SetUsername(FormatContentWithReplacements(gS_DiscordNameFormat, authorName, message, client));
 
-    if (!StrEqual(g_szSteamAvatar[client], "NULL", false) && !StrEqual(g_szSteamAvatar[client], "", false))
+    if (client >= 0 && !StrEqual(g_szSteamAvatar[client], "NULL", false) && !StrEqual(g_szSteamAvatar[client], "", false))
     {
         PrintToConsole(0, "[Infra-DCR] DEBUG: Client %s has an avatar, using it! URL: %s", client, g_szSteamAvatar[client]);
         hook.SetAvatar(g_szSteamAvatar[client]);
@@ -461,6 +553,11 @@ char[] FormatContentWithReplacements(char[] original, const char[] authorName, c
 	}
 	if (StrContains(sMessage, "{NAME}", false) != -1) {
 		ReplaceString(sMessage, sizeof(sMessage), "{NAME}", authorName);
+	}
+	// We just send the new map whenever this would be used.
+	// This sucks. I know.
+	if (StrContains(sMessage, "{NEWMAP}", false) != -1) {
+		ReplaceString(sMessage, sizeof(sMessage), "{NEWMAP}", authorName);
 	}
 
 	ReplaceString(sMessage, sizeof(sMessage), "\\n", "\n");
