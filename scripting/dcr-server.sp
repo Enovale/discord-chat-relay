@@ -40,6 +40,8 @@ ConVar gCV_DiscordMapChangeFormat;
 ConVar gCV_DiscordPlayerConnectFormat;
 ConVar gCV_DiscordPlayerDisconnectFormat;
 
+ConVar gCV_CondensePlayerEvents;
+
 // Cached values
 char gS_BotToken[128];
 char gS_WebhookLink[128];
@@ -57,6 +59,8 @@ char szAPIKey[256];
 HTTPClient httpClient;
 char g_szSteamAvatar[MAXPLAYERS + 1][256];
 char g_lastMessageAuthorId[64];
+char g_connectQueue[(MAXPLAYERS * MAX_NAME_LENGTH) + (sizeof(", ") * MAXPLAYERS - 1)];
+char g_disconnectQueue[sizeof(g_connectQueue)];
 
 bool gB_ListeningToDiscord = false;
 
@@ -91,6 +95,8 @@ public void OnPluginStart()
 	gCV_DiscordPlayerConnectFormat = CreateConVar("sm_discord_player_connect_format", "-# {NAME} connected.", "Format text for when someone connects.");
 	gCV_DiscordPlayerDisconnectFormat = CreateConVar("sm_discord_player_disconnect_format", "-# {NAME} disconnected.", "Format text for when someone disconnects.");
 
+	gCV_CondensePlayerEvents = CreateConVar("sm_discord_condense_player_events", "1", "Should player connect/disconnect events be condensed in a delayed queue.", 0, true, 0.0, true, 1.0);
+
 	gCV_ServerMessageTag.AddChangeHook(OnConVarChanged);
 	gCV_DiscordMessageTag.AddChangeHook(OnConVarChanged);
 	gCV_DiscordMessageFormat.AddChangeHook(OnConVarChanged);
@@ -101,6 +107,25 @@ public void OnPluginStart()
 	gCV_DiscordPlayerDisconnectFormat.AddChangeHook(OnConVarChanged);
 
 	AutoExecConfig(true, "discord-chat-relay-server", "sourcemod");
+	if (gCV_CondensePlayerEvents.BoolValue)
+	{
+		CreateTimer(5.0, OnCheckForPlayerEvents, 0, TIMER_REPEAT);
+	}
+}
+
+public Action OnCheckForPlayerEvents(Handle timer, any data)
+{
+	if (!StrEqual(g_connectQueue, "", true))
+	{
+		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerConnectFormat, g_connectQueue, "", -1), "Server Events", -1, false);
+		g_connectQueue = "";
+	}
+
+	if (!StrEqual(g_disconnectQueue, "", true))
+	{
+		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerDisconnectFormat, g_disconnectQueue, "", -1), "Server Events", -1, false);
+		g_disconnectQueue = "";
+	}
 }
 
 public void OnConVarChanged(ConVar convar, const char[] oldValue, const char[] newValue)
@@ -211,6 +236,16 @@ public void OnConfigsExecuted()
 
 		LogMessage("[Discord Chat Relay] Started Server Chat Relay server on port %d", port);
 	}
+
+	if (!StrEqual(szAPIKey, "", false))
+	{
+		// Get steam avatars for existing players in case of plugin reload
+		for (int i = 1; i <= MaxClients; i++) {
+			if (IsClientConnected(i) && !IsFakeClient(i) && !IsClientSourceTV(i)) {
+				GetProfilePic(i);
+			}
+		}
+	}
 }
 
 public void GuildList(DiscordBot bot, char[] id, char[] name, char[] icon, bool owner, int permissions, any data)
@@ -306,11 +341,28 @@ public void CP_OnChatMessagePost(int author, ArrayList recipients, const char[] 
 public void OnClientPostAdminCheck(int client)
 {
     GetProfilePic(client);
+}
 
-	char sMessage[512];
+public void OnClientConnected(int client)
+{
+	char sMessage[MAX_NAME_LENGTH];
 	GetClientName(client, sMessage, sizeof(sMessage));
 	SanitiseText(sMessage, sizeof(sMessage));
-	SendOutput(FormatContentWithReplacements(gS_DiscordPlayerConnectFormat, sMessage, "", client), "Server Events", client, false);
+	if (!gCV_CondensePlayerEvents.BoolValue)
+	{
+		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerConnectFormat, sMessage, "", client), "Server Events", client, false);
+	}
+	else
+	{
+		if (StrEqual(g_connectQueue, "", true))
+		{
+			Format(g_connectQueue, sizeof(g_connectQueue), "%s", sMessage);
+		}
+		else
+		{
+			Format(g_connectQueue, sizeof(g_connectQueue), "%s, %s", g_connectQueue, sMessage);
+		}
+	}
 }
 
 public void OnMapInit(const char[] mapName)
@@ -321,12 +373,26 @@ public void OnMapInit(const char[] mapName)
 	SendOutput(FormatContentWithReplacements(gS_DiscordMapChangeFormat, sMessage, "", -1), "Server Events", -1, false);
 }
 
-public void OnClientDisconnect_Post(int client)
+public void OnClientDisconnect(int client)
 {
-	char sMessage[512];
+	char sMessage[MAX_NAME_LENGTH];
 	GetClientName(client, sMessage, sizeof(sMessage));
 	SanitiseText(sMessage, sizeof(sMessage));
-	SendOutput(FormatContentWithReplacements(gS_DiscordPlayerDisconnectFormat, sMessage, "", client), "Server Events", client, false);
+	if (!gCV_CondensePlayerEvents.BoolValue)
+	{
+		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerDisconnectFormat, sMessage, "", client), "Server Events", client, false);
+	}
+	else
+	{
+		if (StrEqual(g_disconnectQueue, "", true))
+		{
+			Format(g_disconnectQueue, sizeof(g_disconnectQueue), "%s", sMessage);
+		}
+		else
+		{
+			Format(g_disconnectQueue, sizeof(g_disconnectQueue), "%s, %s", g_disconnectQueue, sMessage);
+		}
+	}
 }
 
 public void OnMessageSent(DiscordBot bot, char[] channel, DiscordMessage message, any data)
