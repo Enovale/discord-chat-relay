@@ -115,13 +115,13 @@ public void OnPluginStart()
 
 public Action OnCheckForPlayerEvents(Handle timer, any data)
 {
-	if (!StrEqual(g_connectQueue, "", true))
+	if (!StrEqual(gS_DiscordPlayerConnectFormat, "", true) && !StrEqual(g_connectQueue, "", true))
 	{
 		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerConnectFormat, g_connectQueue, "", -1), "Server Events", -1, false);
 		g_connectQueue = "";
 	}
 
-	if (!StrEqual(g_disconnectQueue, "", true))
+	if (!StrEqual(gS_DiscordPlayerDisconnectFormat, "", true) && !StrEqual(g_disconnectQueue, "", true))
 	{
 		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerDisconnectFormat, g_disconnectQueue, "", -1), "Server Events", -1, false);
 		g_disconnectQueue = "";
@@ -325,6 +325,7 @@ public void CP_OnChatMessagePost(int author, ArrayList recipients, const char[] 
 		if (!StrEqual(szSteamID, g_lastMessageAuthorId))
 		{
 			SanitiseText(nMessage, sizeof(nMessage));
+			SanitiseText(sMessage, sizeof(sMessage));
 			char cMessage[1024];
 			Format(cMessage, sizeof(cMessage), "%s\n%s", FormatContentWithReplacements(gS_DiscordNewTalkFormat, nMessage, "", author), FormatContentWithReplacements(gS_DiscordMessageFormat, nMessage, sMessage, author));
 			SendOutput(cMessage, nMessage, author, false);
@@ -343,12 +344,12 @@ public void OnClientPostAdminCheck(int client)
     GetProfilePic(client);
 }
 
-public void OnClientConnected(int client)
+public void OnClientAuthorized(int client)
 {
 	char sMessage[MAX_NAME_LENGTH];
 	GetClientName(client, sMessage, sizeof(sMessage));
 	SanitiseText(sMessage, sizeof(sMessage));
-	if (!gCV_CondensePlayerEvents.BoolValue)
+	if (!StrEqual(gS_DiscordPlayerConnectFormat, "", true) && !gCV_CondensePlayerEvents.BoolValue)
 	{
 		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerConnectFormat, sMessage, "", client), "Server Events", client, false);
 	}
@@ -367,10 +368,13 @@ public void OnClientConnected(int client)
 
 public void OnMapInit(const char[] mapName)
 {
-	char sMessage[512];
-	Format(sMessage, sizeof(sMessage), "%s", mapName);
-	SanitiseText(sMessage, sizeof(sMessage));
-	SendOutput(FormatContentWithReplacements(gS_DiscordMapChangeFormat, sMessage, "", -1), "Server Events", -1, false);
+	if (!StrEqual(gS_DiscordMapChangeFormat, "", true))
+	{
+		char sMessage[512];
+		Format(sMessage, sizeof(sMessage), "%s", mapName);
+		SanitiseText(sMessage, sizeof(sMessage));
+		SendOutput(FormatContentWithReplacements(gS_DiscordMapChangeFormat, sMessage, "", -1), "Server Events", -1, false);
+	}
 }
 
 public void OnClientDisconnect(int client)
@@ -378,7 +382,7 @@ public void OnClientDisconnect(int client)
 	char sMessage[MAX_NAME_LENGTH];
 	GetClientName(client, sMessage, sizeof(sMessage));
 	SanitiseText(sMessage, sizeof(sMessage));
-	if (!gCV_CondensePlayerEvents.BoolValue)
+	if (!StrEqual(gS_DiscordPlayerDisconnectFormat, "", true) && !gCV_CondensePlayerEvents.BoolValue)
 	{
 		SendOutput(FormatContentWithReplacements(gS_DiscordPlayerDisconnectFormat, sMessage, "", client), "Server Events", client, false);
 	}
