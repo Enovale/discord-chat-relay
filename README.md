@@ -3,7 +3,7 @@ Discord chat relay for sourcemod servers.
 
 Requirements:
 ------
-* [Discord API](https://github.com/Deathknife/sourcemod-discord)
+* [Discord API](https://github.com/Cruze03/sourcemod-discord/)
   * [SteamWorks](https://forums.alliedmods.net/showthread.php?t=229556)
   * [smjansson](https://forums.alliedmods.net/showthread.php?t=184604)
 * [Socket](https://forums.alliedmods.net/showthread.php?t=67640)
